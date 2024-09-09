@@ -115,10 +115,14 @@ class SAM2Base(torch.nn.Module):
         # Part 2: memory attention to condition current frame's visual features
         # with memories (and obj ptrs) from past frames
         self.memory_attention = memory_attention
+        self.memory_attention_onnx_exported = False
+        self.memory_attention_tflite_exported = False
         self.hidden_dim = memory_attention.d_model
 
         # Part 3: memory encoder for the previous frame's outputs
         self.memory_encoder = memory_encoder
+        self.memory_encoder_onnx_exported = False
+        self.memory_encoder_tflite_exported = False
         self.mem_dim = self.hidden_dim
         if hasattr(self.memory_encoder, "out_proj") and hasattr(
             self.memory_encoder.out_proj, "weight"
@@ -175,6 +179,8 @@ class SAM2Base(torch.nn.Module):
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
         self.max_cond_frames_in_attn = max_cond_frames_in_attn
 
+        self.mlp_onnx_exported = False
+
         # Model compilation
         if compile_image_encoder:
             # Compile the forward function (not the full module) to allow loading checkpoints.
@@ -187,12 +193,57 @@ class SAM2Base(torch.nn.Module):
                 fullgraph=True,
                 dynamic=False,
             )
+        
+        # onnx
+        self.image_encoder_onnx = None
+        self.prompt_encoder_onnx = None
+        self.mask_decoder_onnx = None
+        self.mlp_onnx = None
+        self.memory_attention_onnx = None
+        self.memory_encoder_onnx = None
+
+        # Check decoder sample parameter
+        assert(self.image_size == 1024)
+        assert(self.num_feature_levels == 3)
+        assert(self.hidden_dim == 256)
+        assert(self.num_maskmem == 7)
+        assert(self.directly_add_no_mem_embed == True)
+        #assert(self.training == False)
+        assert(self.mem_dim == 64)
+        assert(self.add_tpos_enc_to_obj_ptrs == False)
+        assert(self.use_obj_ptrs_in_encoder == True)
+        assert(self.add_all_frames_to_correct_as_cond == False)
+        assert(self.multimask_output_in_sam == True)
+        assert(self.multimask_min_pt_num == 0)
+        assert(self.multimask_max_pt_num == 1)
+        assert(self.sam_prompt_embed_dim == self.hidden_dim)
+        assert(self.backbone_stride == 16)
+        assert(self.sam_image_embedding_size == self.image_size // self.backbone_stride)
+        assert(self.pred_obj_scores == True)
+        assert(self.use_obj_ptrs_in_encoder == True)
+        assert(self.use_mlp_for_obj_ptr_proj == True)
+        assert(self.proj_tpos_enc_in_obj_ptrs == False)
+        assert(self.soft_no_obj_ptr == False)
+        assert(self.fixed_no_obj_ptr == True)
+        assert(self.non_overlap_masks_for_mem_enc == False)
+        assert(self.binarize_mask_from_pts_for_mem_enc == False or self.binarize_mask_from_pts_for_mem_enc == True) # True for video
+        assert(self.sigmoid_scale_for_mem_enc == 20)
+        assert(self.sigmoid_bias_for_mem_enc == -10.0)
+        assert(self.sam_mask_decoder.dynamic_multimask_via_stability == True)
+        assert(self.sam_mask_decoder.dynamic_multimask_stability_delta == 0.05)
+        assert(self.sam_mask_decoder.dynamic_multimask_stability_thresh == 0.98)
+        assert(self.max_cond_frames_in_attn == -1)
+        assert(self.memory_temporal_stride_for_eval == 1)
+        assert(self.max_obj_ptrs_in_encoder == 16)
+        assert(self.only_obj_ptrs_in_the_past_for_eval == True)
+        assert(self.multimask_output_for_tracking == True)
+        assert(self.use_multimask_token_for_obj_ptr == True)
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-    def forward(self, *args, **kwargs):
+    def forward(self):
         raise NotImplementedError(
             "Please use the corresponding methods in SAM2VideoPredictor for inference."
             "See notebooks/video_predictor_example.ipynb for an example."
@@ -255,6 +306,11 @@ class SAM2Base(torch.nn.Module):
         mask_inputs=None,
         high_res_features=None,
         multimask_output=False,
+        export_to_onnx=False,
+        import_from_onnx=False,
+        export_to_tflite=False,
+        import_from_tflite=False,
+        model_id=None
     ):
         """
         Forward SAM prompt encoders and mask heads.
@@ -331,25 +387,147 @@ class SAM2Base(torch.nn.Module):
             # a learned `no_mask_embed` to indicate no mask input in this case).
             sam_mask_prompt = None
 
-        sparse_embeddings, dense_embeddings = self.sam_prompt_encoder(
-            points=(sam_point_coords, sam_point_labels),
-            boxes=None,
-            masks=sam_mask_prompt,
-        )
-        (
-            low_res_multimasks,
-            ious,
-            sam_output_tokens,
-            object_score_logits,
-        ) = self.sam_mask_decoder(
-            image_embeddings=backbone_features,
-            image_pe=self.sam_prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=multimask_output,
-            repeat_image=False,  # the image is already batched
-            high_res_features=high_res_features,
-        )
+        if sam_mask_prompt is None:
+            import numpy as np
+            mask_input_dummy = torch.Tensor(np.zeros((1, 256, 256)))
+            masks_enable = torch.tensor([0], dtype=torch.int)
+        else:
+            mask_input_dummy = sam_mask_prompt
+            masks_enable = torch.tensor([1], dtype=torch.int)
+
+        if import_from_onnx:
+            print("begin prompt encoder onnx")
+            if sam_mask_prompt != None:
+                raise("currently not supported mask prompt")
+            import onnxruntime
+            if self.prompt_encoder_onnx == None:
+                self.prompt_encoder_onnx = onnxruntime.InferenceSession("model/prompt_encoder_"+model_id+".onnx")
+            sparse_embeddings, dense_embeddings, dense_pe = self.prompt_encoder_onnx.run(None, {"coords":sam_point_coords.numpy(), "labels":sam_point_labels.numpy(), "masks":mask_input_dummy.numpy(), "masks_enable":masks_enable.numpy()})
+            sparse_embeddings = torch.Tensor(sparse_embeddings)
+            dense_embeddings = torch.Tensor(dense_embeddings)
+            dense_pe = torch.Tensor(dense_pe)
+
+            if self.mask_decoder_onnx == None:
+                self.mask_decoder_onnx  = onnxruntime.InferenceSession("model/mask_decoder_"+model_id+".onnx")
+           # print("backbone_features", backbone_features.shape)
+            print("begin mask decoder onnx")
+            print("begin mask decoder onnx")
+            print("backbone_features", np.sum(backbone_features.numpy()))
+            print("image_pe", np.sum(dense_pe.numpy()))
+            print("sparse_embeddings", np.sum(sparse_embeddings.numpy()))
+            print("dense_embeddings", np.sum(dense_embeddings.numpy()))
+            print("high_res_features", np.sum(high_res_features[0].numpy()))
+            print("high_res_features", np.sum(high_res_features[1].numpy()))
+            masks, iou_pred, sam_tokens_out, object_score_logits  = self.mask_decoder_onnx.run(None, {
+                "image_embeddings":backbone_features.numpy(),
+                "image_pe": dense_pe.numpy(),
+                "sparse_prompt_embeddings": sparse_embeddings.numpy(),
+                "dense_prompt_embeddings": dense_embeddings.numpy(),
+                #repeat_image=False,  # the image is already batched
+                "high_res_features1":high_res_features[0].numpy(),
+                "high_res_features2":high_res_features[1].numpy()})
+            masks = torch.Tensor(masks)
+            iou_pred = torch.Tensor(iou_pred)
+            sam_tokens_out = torch.Tensor(sam_tokens_out)
+            object_score_logits = torch.Tensor(object_score_logits)
+            low_res_multimasks, ious, sam_output_tokens, object_score_logits  = self.sam_mask_decoder.forward_postprocess(masks, iou_pred, sam_tokens_out, object_score_logits, multimask_output)
+            print(low_res_multimasks.shape)
+            print(ious.shape)
+            print(sam_output_tokens.shape)
+            print(object_score_logits.shape)
+
+        if import_from_tflite:
+            import tensorflow as tf
+            prompt_encoder = tf.lite.Interpreter(model_path="model/prompt_encoder_"+model_id+".tflite")
+            mask_decoder = tf.lite.Interpreter(model_path="model/mask_decoder_"+model_id+".tflite")
+
+            prompt_encoder.allocate_tensors()
+            input_details = prompt_encoder.get_input_details()
+            output_details = prompt_encoder.get_output_details()
+            prompt_encoder.resize_tensor_input(
+                input_details[2]["index"], 
+                [1, sam_point_coords.shape[1], 2]
+            )
+            prompt_encoder.allocate_tensors()
+
+            prompt_encoder.set_tensor(input_details[2]["index"], sam_point_coords)
+            prompt_encoder.set_tensor(input_details[3]["index"], sam_point_labels)
+            prompt_encoder.set_tensor(input_details[0]["index"], mask_input_dummy)
+            prompt_encoder.set_tensor(input_details[1]["index"], masks_enable)
+            prompt_encoder.invoke()
+
+            sparse_embeddings = prompt_encoder.get_tensor(output_details[1]["index"])
+            dense_embeddings = prompt_encoder.get_tensor(output_details[2]["index"])
+            dense_pe = prompt_encoder.get_tensor(output_details[0]["index"])
+
+            mask_decoder.allocate_tensors()
+            input_details = mask_decoder.get_input_details()
+            output_details = mask_decoder.get_output_details()
+            mask_decoder.resize_tensor_input(
+                input_details[1]["index"], 
+                [1, sparse_embeddings.shape[1], 256]
+            )
+            mask_decoder.allocate_tensors()
+
+            batched_mode = False
+
+            mask_decoder.set_tensor(input_details[3]["index"], backbone_features.numpy())
+            mask_decoder.set_tensor(input_details[6]["index"], dense_pe.numpy())
+            mask_decoder.set_tensor(input_details[1]["index"], sparse_embeddings.numpy())
+            mask_decoder.set_tensor(input_details[2]["index"], dense_embeddings.numpy())
+            mask_decoder.set_tensor(input_details[5]["index"], batched_mode)
+            mask_decoder.set_tensor(input_details[0]["index"], high_res_features[0].numpy())
+            mask_decoder.set_tensor(input_details[4]["index"], high_res_features[1].numpy())
+            mask_decoder.invoke()
+
+            masks = mask_decoder.get_tensor(output_details[2]["index"])
+            iou_pred = mask_decoder.get_tensor(output_details[0]["index"])
+            sam_tokens_out = mask_decoder.get_tensor(output_details[3]["index"])
+            object_score_logits = mask_decoder.get_tensor(output_details[1]["index"])
+
+            low_res_multimasks, ious, sam_output_tokens, object_score_logits  = self.sam_mask_decoder.forward_postprocess(masks, iou_pred, sam_tokens_out, object_score_logits, multimask_output)
+            print(low_res_multimasks.shape)
+            print(ious.shape)
+            print(sam_output_tokens.shape)
+            print(object_score_logits.shape)
+
+        if not import_from_onnx and not import_from_tflite:
+            print("begin mask decoder torch")
+            print("backbone_features", backbone_features.shape)
+            if sam_mask_prompt is None:
+                import numpy as np
+                mask_input_dummy = torch.Tensor(np.zeros((1, 256, 256)))
+                masks_enable = torch.tensor([0], dtype=torch.int)
+            else:
+                mask_input_dummy = sam_mask_prompt
+                masks_enable = torch.tensor([1], dtype=torch.int)
+            sparse_embeddings, dense_embeddings, dense_pe = self.sam_prompt_encoder.forward(
+                coords=sam_point_coords,
+                labels=sam_point_labels,
+                masks=mask_input_dummy,
+                masks_enable=masks_enable
+            )
+
+            (
+                low_res_multimasks,
+                ious,
+                sam_output_tokens,
+                object_score_logits,
+            ) = self.sam_mask_decoder.forward_normal(
+                image_embeddings=backbone_features,
+                image_pe=dense_pe,
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output,
+                repeat_image=False,  # the image is already batched
+                high_res_features1=high_res_features[0],
+                high_res_features2=high_res_features[1],
+            )
+            print(low_res_multimasks.shape)
+            print(ious.shape)
+            print(sam_output_tokens.shape)
+            print(object_score_logits.shape)
+
         if self.pred_obj_scores:
             is_obj_appearing = object_score_logits > 0
 
@@ -384,7 +562,31 @@ class SAM2Base(torch.nn.Module):
             low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
 
         # Extract object pointer from the SAM output token (with occlusion handling)
-        obj_ptr = self.obj_ptr_proj(sam_output_token)
+        if export_to_onnx and not self.mlp_onnx_exported:
+            print("x", sam_output_token.shape)
+            self.mlp_onnx_exported = True
+            torch.onnx.export(
+                self.obj_ptr_proj, (sam_output_token), 'model/mlp_'+model_id+'.onnx',
+                input_names=["x"],
+                output_names=["x_out"],
+                dynamic_axes={
+                    'x': {0: 'n'},
+                    'obj_ptr': {0: 'n'}
+                },
+                verbose=False, opset_version=17
+            )
+
+        if import_from_onnx:
+            import onnxruntime
+            if self.mlp_onnx == None:
+                self.mlp_onnx  = onnxruntime.InferenceSession("model/mlp_"+model_id+".onnx")
+            import numpy as np
+            obj_ptr = self.mlp_onnx.run(None, {"x":sam_output_token.numpy()})[0]
+            obj_ptr = torch.Tensor(obj_ptr)
+        
+        if not import_from_onnx:
+            obj_ptr = self.obj_ptr_proj(sam_output_token)
+
         if self.pred_obj_scores:
             # Allow *soft* no obj ptr, unlike for masks
             if self.soft_no_obj_ptr:
@@ -408,7 +610,7 @@ class SAM2Base(torch.nn.Module):
             object_score_logits,
         )
 
-    def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
+    def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs, export_to_onnx, import_from_onnx, export_to_tflite, import_from_tflite, model_id):
         """
         Directly turn binary `mask_inputs` into a output mask logits without using SAM.
         (same input and output shapes as in _forward_sam_heads above).
@@ -437,6 +639,11 @@ class SAM2Base(torch.nn.Module):
                 backbone_features=backbone_features,
                 mask_inputs=self.mask_downsample(mask_inputs_float),
                 high_res_features=high_res_features,
+                export_to_onnx=export_to_onnx,
+                import_from_onnx=import_from_onnx,
+                export_to_tflite=export_to_tflite,
+                import_from_tflite=import_from_tflite,
+                model_id=model_id
             )
         # In this method, we are treating mask_input as output, e.g. using it directly to create spatial mem;
         # Below, we follow the same design axiom to use mask_input to decide if obj appears or not instead of relying
@@ -472,7 +679,7 @@ class SAM2Base(torch.nn.Module):
             backbone_out["backbone_fpn"][1] = self.sam_mask_decoder.conv_s1(
                 backbone_out["backbone_fpn"][1]
             )
-        return backbone_out
+        return backbone_out["vision_features"], backbone_out["vision_pos_enc"][0], backbone_out["vision_pos_enc"][1], backbone_out["vision_pos_enc"][2], backbone_out["backbone_fpn"][0], backbone_out["backbone_fpn"][1], backbone_out["backbone_fpn"][2]
 
     def _prepare_backbone_features(self, backbone_out):
         """Prepare and flatten visual features."""
@@ -500,6 +707,11 @@ class SAM2Base(torch.nn.Module):
         output_dict,
         num_frames,
         track_in_reverse=False,  # tracking in reverse time order (for demo usage)
+        export_to_onnx=False,
+        import_from_onnx=False,
+        export_to_tflite=False,
+        import_from_tflite=False,
+        model_id=None
     ):
         """Fuse the current frame's visual feature map with previous memory."""
         B = current_vision_feats[-1].size(1)  # batch size on this frame
@@ -567,10 +779,10 @@ class SAM2Base(torch.nn.Module):
                     continue  # skip padding frames
                 # "maskmem_features" might have been offloaded to CPU in demo use cases,
                 # so we load it back to GPU (it's a no-op if it's already on GPU).
-                feats = prev["maskmem_features"].cuda(non_blocking=True)
+                feats = prev["maskmem_features"].to(device, non_blocking=True)
                 to_cat_memory.append(feats.flatten(2).permute(2, 0, 1))
                 # Spatial positional encoding (it might have been offloaded to CPU in eval)
-                maskmem_enc = prev["maskmem_pos_enc"][-1].cuda()
+                maskmem_enc = prev["maskmem_pos_enc"][-1].to(device)
                 maskmem_enc = maskmem_enc.flatten(2).permute(2, 0, 1)
                 # Temporal positional encoding
                 maskmem_enc = (
@@ -642,7 +854,7 @@ class SAM2Base(torch.nn.Module):
                 pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
                 return pix_feat_with_mem
 
-            # Use a dummy token on the first frame (to avoid emtpy memory input to tranformer encoder)
+            # Use a dummy token on the first frame (to avoid empty memory input to tranformer encoder)
             to_cat_memory = [self.no_mem_embed.expand(1, B, self.mem_dim)]
             to_cat_memory_pos_embed = [self.no_mem_pos_enc.expand(1, B, self.mem_dim)]
 
@@ -650,13 +862,63 @@ class SAM2Base(torch.nn.Module):
         memory = torch.cat(to_cat_memory, dim=0)
         memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
 
-        pix_feat_with_mem = self.memory_attention(
-            curr=current_vision_feats,
-            curr_pos=current_vision_pos_embeds,
-            memory=memory,
-            memory_pos=memory_pos_embed,
-            num_obj_ptr_tokens=num_obj_ptr_tokens,
-        )
+        if export_to_onnx and not self.memory_attention_onnx_exported:
+            self.memory_attention_onnx_exported = True
+            #print("current_vision_feats", current_vision_feats[0].shape, current_vision_feats[0].dtype)
+            #print("memory", memory.shape, memory.dtype)
+            #print("current_vision_pos_embeds", current_vision_pos_embeds[0].shape, current_vision_pos_embeds[0].dtype)
+            #print("memory_pos_embed", memory_pos_embed.shape, memory_pos_embed.dtype)
+            #print("num_obj_ptr_tokens", num_obj_ptr_tokens)
+            torch.onnx.export( # dynamo_export
+                self.memory_attention, (current_vision_feats[0], memory, current_vision_pos_embeds[0], memory_pos_embed, num_obj_ptr_tokens), 'model/memory_attention_'+model_id+'.onnx',
+                input_names=["curr", "memory", "curr_pos", "memory_pos", "num_obj_ptr_tokens"],
+                output_names=["pix_feat"],
+                dynamic_axes={
+                    'memory': {0: 'n'},
+                    'memory_pos': {0: 'n'}
+                },
+                verbose=False, opset_version=17
+            )
+
+        if import_from_onnx:
+            print("begin memory attention onnx")
+            import onnxruntime
+            if self.memory_attention_onnx == None:
+                self.memory_attention_onnx = onnxruntime.InferenceSession("model/memory_attention_"+model_id+".onnx")
+            import numpy as np
+            num_obj_ptr_tokens_numpy = np.array((num_obj_ptr_tokens)).astype(np.int64)
+            print("curr", np.sum(current_vision_feats[0].numpy()))
+            print("memory", np.sum(memory.numpy()))
+            print("curr_pos", np.sum(current_vision_pos_embeds[0].numpy()))
+            print("memory_pos", np.sum(memory_pos_embed.numpy()))
+            print("num_obj_ptr_tokens", np.sum(num_obj_ptr_tokens_numpy))
+
+            pix_feat_with_mem = self.memory_attention_onnx.run(None, {"curr":current_vision_feats[0].numpy(), "memory":memory.numpy(), "curr_pos":current_vision_pos_embeds[0].numpy(), "memory_pos":memory_pos_embed.numpy(), "num_obj_ptr_tokens":num_obj_ptr_tokens_numpy})
+            pix_feat_with_mem = torch.Tensor(pix_feat_with_mem[0])
+        
+        if export_to_tflite and not self.memory_attention_tflite_exported:
+            self.memory_attention_tflite_exported = True
+            import ai_edge_torch
+            import tensorflow as tf
+            sample_inputs = (current_vision_feats[0], memory, current_vision_pos_embeds[0], memory_pos_embed, num_obj_ptr_tokens)
+            tfl_converter_flags = {'target_spec': {'supported_ops': [tf.lite.OpsSet.TFLITE_BUILTINS]}}
+            edge_model = ai_edge_torch.convert(self.memory_attention, sample_inputs, _ai_edge_converter_flags=tfl_converter_flags)
+            edge_model.export("memory_attention_"+model_id+".tflite")
+
+            if import_from_tflite:
+                pix_feat_with_mem = edge_model(sample_inputs)
+                pix_feat_with_mem = torch.Tensor(pix_feat_with_mem[0])
+
+        if not import_from_onnx and not import_from_tflite:
+            print("begin memory attention torch")
+            pix_feat_with_mem = self.memory_attention(
+                curr=current_vision_feats,
+                curr_pos=current_vision_pos_embeds,
+                memory=memory,
+                memory_pos=memory_pos_embed,
+                num_obj_ptr_tokens=num_obj_ptr_tokens,
+            )
+
         # reshape the output (HW)BC => BCHW
         pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
         return pix_feat_with_mem
@@ -667,13 +929,25 @@ class SAM2Base(torch.nn.Module):
         feat_sizes,
         pred_masks_high_res,
         is_mask_from_pts,
+        export_to_onnx = False,
+        import_from_onnx = False,
+        export_to_tflite = False,
+        import_from_tflite = False,
+        model_id = None
     ):
         """Encode the current image and its prediction into a memory feature."""
-        B = current_vision_feats[-1].size(1)  # batch size on this frame
+        # B = current_vision_feats[-1].size(1)  # batch size on this frame
+        # C = self.hidden_dim
+        # H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
+        # # top-level feature, (HW)BC => BCHW
+        # pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+
+        B = current_vision_feats.size(1)
         C = self.hidden_dim
-        H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
-        # top-level feature, (HW)BC => BCHW
-        pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+        H, W = feat_sizes[-1]
+        pix_feat = current_vision_feats
+
+
         if self.non_overlap_masks_for_mem_enc and not self.training:
             # optionally, apply non-overlapping constraints to the masks (it's applied
             # in the batch dimension and should only be used during eval, where all
@@ -693,11 +967,45 @@ class SAM2Base(torch.nn.Module):
             mask_for_mem = mask_for_mem * self.sigmoid_scale_for_mem_enc
         if self.sigmoid_bias_for_mem_enc != 0.0:
             mask_for_mem = mask_for_mem + self.sigmoid_bias_for_mem_enc
-        maskmem_out = self.memory_encoder(
-            pix_feat, mask_for_mem, skip_mask_sigmoid=True  # sigmoid already applied
-        )
-        maskmem_features = maskmem_out["vision_features"]
-        maskmem_pos_enc = maskmem_out["vision_pos_enc"]
+
+        if export_to_onnx and not self.memory_encoder_onnx_exported:
+            self.memory_encoder_onnx_exported = True
+            torch.onnx.export(
+                self.memory_encoder, (pix_feat, mask_for_mem, True), 'model/memory_encoder_'+model_id+'.onnx',
+                input_names=["pix_feat", "masks"],
+                output_names=["vision_features", "vision_pos_enc"],
+                verbose=False, opset_version=17
+            )
+
+        if import_from_onnx:
+            print("begin memory encoder onnx")
+            import onnxruntime
+            if self.memory_encoder_onnx == None:
+                self.memory_encoder_onnx = onnxruntime.InferenceSession("model/memory_encoder_"+model_id+".onnx")
+            vision_features, vision_pos_enc = self.memory_encoder_onnx.run(None, {"pix_feat":pix_feat.numpy(), "masks":mask_for_mem.numpy()})
+            vision_features = torch.Tensor(vision_features)
+            vision_pos_enc = torch.Tensor(vision_pos_enc)
+
+        if export_to_tflite and not self.memory_encoder_tflite_exported:
+            self.memory_encoder_tflite_exported = True
+            import ai_edge_torch
+            import tensorflow as tf
+            sample_inputs = (pix_feat, mask_for_mem, True)
+            tfl_converter_flags = {'target_spec': {'supported_ops': [tf.lite.OpsSet.TFLITE_BUILTINS]}}
+            edge_model = ai_edge_torch.convert(self.memory_encoder, sample_inputs, _ai_edge_converter_flags=tfl_converter_flags)
+            edge_model.export("memory_encoder"+model_id+".tflite")
+
+            if import_from_tflite:
+                vision_features, vision_pos_enc = edge_model(sample_inputs)
+
+        if not import_from_onnx and not import_from_tflite:
+            print("begin memory encoder torch")
+            vision_features, vision_pos_enc = self.memory_encoder(
+                pix_feat, mask_for_mem, skip_mask_sigmoid=True  # sigmoid already applied
+            )
+
+        maskmem_features = vision_features
+        maskmem_pos_enc = vision_pos_enc
 
         return maskmem_features, maskmem_pos_enc
 
@@ -721,6 +1029,12 @@ class SAM2Base(torch.nn.Module):
         run_mem_encoder=True,
         # The previously predicted SAM mask logits (which can be fed together with new clicks in demo).
         prev_sam_mask_logits=None,
+        # ONNX Export
+        export_to_onnx=False,
+        import_from_onnx=False,
+        export_to_tflite=False,
+        import_from_tflite=False,
+        model_id=None
     ):
         current_out = {"point_inputs": point_inputs, "mask_inputs": mask_inputs}
         # High-resolution feature maps for the SAM head, reshape (HW)BC => BCHW
@@ -737,7 +1051,8 @@ class SAM2Base(torch.nn.Module):
             pix_feat = current_vision_feats[-1].permute(1, 2, 0)
             pix_feat = pix_feat.view(-1, self.hidden_dim, *feat_sizes[-1])
             sam_outputs = self._use_mask_as_output(
-                pix_feat, high_res_features, mask_inputs
+                pix_feat, high_res_features, mask_inputs,
+                export_to_onnx=export_to_onnx, import_from_onnx=import_from_onnx, export_to_tflite=export_to_tflite, import_from_tflite=import_from_tflite, model_id=model_id
             )
         else:
             # fused the visual feature with previous memory features in the memory bank
@@ -750,6 +1065,11 @@ class SAM2Base(torch.nn.Module):
                 output_dict=output_dict,
                 num_frames=num_frames,
                 track_in_reverse=track_in_reverse,
+                export_to_onnx=export_to_onnx,
+                import_from_onnx=import_from_onnx,
+                export_to_tflite=export_to_tflite,
+                import_from_tflite=import_from_tflite,
+                model_id=model_id
             )
             # apply SAM-style segmentation head
             # here we might feed previously predicted low-res SAM mask logits into the SAM mask decoder,
@@ -765,6 +1085,11 @@ class SAM2Base(torch.nn.Module):
                 mask_inputs=mask_inputs,
                 high_res_features=high_res_features,
                 multimask_output=multimask_output,
+                export_to_onnx=export_to_onnx,
+                import_from_onnx=import_from_onnx,
+                export_to_tflite=export_to_tflite,
+                import_from_tflite=import_from_tflite,
+                model_id=model_id
             )
         (
             _,
@@ -789,6 +1114,11 @@ class SAM2Base(torch.nn.Module):
                 feat_sizes=feat_sizes,
                 pred_masks_high_res=high_res_masks_for_mem_enc,
                 is_mask_from_pts=(point_inputs is not None),
+                export_to_onnx=export_to_onnx,
+                import_from_onnx=import_from_onnx,
+                export_to_tflite=export_to_tflite,
+                import_from_tflite=import_from_tflite,
+                model_id=model_id
             )
             current_out["maskmem_features"] = maskmem_features
             current_out["maskmem_pos_enc"] = maskmem_pos_enc

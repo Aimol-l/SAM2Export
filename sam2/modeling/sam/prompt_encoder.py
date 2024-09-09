@@ -92,12 +92,30 @@ class PromptEncoder(nn.Module):
         point_embedding = self.pe_layer.forward_with_coords(
             points, self.input_image_size
         )
-        point_embedding[labels == -1] = 0.0
-        point_embedding[labels == -1] += self.not_a_point_embed.weight
-        point_embedding[labels == 0] += self.point_embeddings[0].weight
-        point_embedding[labels == 1] += self.point_embeddings[1].weight
-        point_embedding[labels == 2] += self.point_embeddings[2].weight
-        point_embedding[labels == 3] += self.point_embeddings[3].weight
+
+        # こっちだとonnxでbroadcast error
+        #point_embedding[labels == -1] = 0.0
+        #point_embedding[labels == -1] += self.not_a_point_embed.weight
+
+        # こっちだとonnxで動くが、tfliteでうごかない
+        #point_embedding[labels == -1] = self.not_a_point_embed.weight
+        
+        #point_embedding[labels == 0] += self.point_embeddings[0].weight
+        #point_embedding[labels == 1] += self.point_embeddings[1].weight
+        #point_embedding[labels == 2] += self.point_embeddings[2].weight
+        #point_embedding[labels == 3] += self.point_embeddings[3].weight
+
+        # こっちだと、tfliteでも動く
+        labels = labels.int()
+        table = torch.zeros((5, self.point_embeddings[0].weight.shape[1]))
+        table[0] = self.not_a_point_embed.weight
+        table[1] = self.point_embeddings[0].weight
+        table[2] = self.point_embeddings[1].weight
+        table[3] = self.point_embeddings[2].weight
+        table[4] = self.point_embeddings[3].weight
+        for i in range(labels.shape[0]):
+            point_embedding[i] = point_embedding[i] + table[labels[i] + 1]
+
         return point_embedding
 
     def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
@@ -118,17 +136,15 @@ class PromptEncoder(nn.Module):
 
     def _get_batch_size(
         self,
-        points: Optional[Tuple[torch.Tensor, torch.Tensor]],
-        boxes: Optional[torch.Tensor],
+        coords: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
     ) -> int:
         """
         Gets the batch size of the output given the batch size of the input prompts.
         """
-        if points is not None:
-            return points[0].shape[0]
-        elif boxes is not None:
-            return boxes.shape[0]
+        if coords is not None and labels is not None:
+            return coords.shape[0]
         elif masks is not None:
             return masks.shape[0]
         else:
@@ -139,9 +155,10 @@ class PromptEncoder(nn.Module):
 
     def forward(
         self,
-        points: Optional[Tuple[torch.Tensor, torch.Tensor]],
-        boxes: Optional[torch.Tensor],
+        coords: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
+        masks_enable: Optional[torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -160,23 +177,22 @@ class PromptEncoder(nn.Module):
           torch.Tensor: dense embeddings for the masks, in the shape
             Bx(embed_dim)x(embed_H)x(embed_W)
         """
-        bs = self._get_batch_size(points, boxes, masks)
+        if coords is None or labels is None:
+            raise("onnx not supported coords is None")
+
+        bs = self._get_batch_size(coords, labels, masks)
         sparse_embeddings = torch.empty(
             (bs, 0, self.embed_dim), device=self._get_device()
         )
-        if points is not None:
-            coords, labels = points
-            point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
-            sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
-        if boxes is not None:
-            box_embeddings = self._embed_boxes(boxes)
-            sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
-        if masks is not None:
-            dense_embeddings = self._embed_masks(masks)
-        else:
-            dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
-                bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
-            )
+        point_embeddings = self._embed_points(coords, labels, pad=True)
+        sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
+        
+        dense_embeddings1 = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
+            bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
+        )
+        dense_embeddings2 = self._embed_masks(masks)
 
-        return sparse_embeddings, dense_embeddings
+        dense_embeddings = torch.where(masks_enable[0] == 1, dense_embeddings2, dense_embeddings1)
+
+        return sparse_embeddings, dense_embeddings, self.get_dense_pe()

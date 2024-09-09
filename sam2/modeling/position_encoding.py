@@ -16,7 +16,7 @@ from torch import nn
 class PositionEmbeddingSine(nn.Module):
     """
     This is a more standard version of the position embedding, very similar to the one
-    used by the Attention is all you need paper, generalized to work on images.
+    used by the Attention Is All You Need paper, generalized to work on images.
     """
 
     def __init__(
@@ -211,6 +211,51 @@ def apply_rotary_enc(
     # repeat freqs along seq_len dim to match k seq_len
     if repeat_freqs_k:
         r = xk_.shape[-2] // xq_.shape[-2]
-        freqs_cis = freqs_cis.repeat(*([1] * (freqs_cis.ndim - 2)), r, 1)
+        if freqs_cis.is_cuda:
+            freqs_cis = freqs_cis.repeat(*([1] * (freqs_cis.ndim - 2)), r, 1)
+        else:
+            # torch.repeat on complex numbers may not be supported on non-CUDA devices
+            # (freqs_cis has 4 dims and we repeat on dim 2) so we use expand + flatten
+            freqs_cis = freqs_cis.unsqueeze(2).expand(-1, -1, r, -1, -1).flatten(2, 3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
+
+
+# Matrix version of rotary enc
+# https://github.com/facebookresearch/segment-anything-2/issues/186
+
+def get_rotation_matrices(dim, end_x, end_y, theta=10000.0, device=None, dtype=None):
+    
+    powers = torch.linspace(0, 1, 1 + (dim // 4), device=device, dtype=dtype)[:-1]
+    base_angles = torch.pow(theta, -powers)
+
+    end_x, end_y = int(end_x), int(end_y)
+    x_mults = torch.arange(end_x, device=device, dtype=dtype).repeat(end_y)
+    y_mults = torch.arange(end_y, device=device, dtype=dtype).repeat_interleave(end_x)
+    angles_xy = (torch.outer(mults, base_angles) for mults in (x_mults, y_mults))
+    
+    rotmats_list = []
+    for angles in angles_xy:
+        sterm, cterm = torch.sin(-angles), torch.cos(-angles)
+        rotmat = torch.stack(
+            [
+                torch.stack([cterm, -sterm], dim=-1),
+                torch.stack([sterm, cterm], dim=-1),
+            ],
+            dim=-1,
+        )
+        rotmats_list.append(rotmat)
+
+    return torch.cat(rotmats_list, dim=1).unsqueeze(0).unsqueeze(0)
+
+
+def apply_rotary_matenc(xq, xk, rotmats, repeat_freqs_k=False):
+    
+    bq, hq, nq, cq = xq.shape
+    bk, hk, nk, ck = xk.shape
+
+    q_out = torch.matmul(rotmats, xq.reshape(bq, hq, nq, cq // 2, 2, 1)).flatten(3)
+    k_rotmat = rotmats.repeat(1, 1, nk // nq, 1, 1, 1) if repeat_freqs_k else rotmats
+    k_out = torch.matmul(k_rotmat, xk.reshape(bk, hk, nk, ck // 2, 2, 1)).flatten(3)
+
+    return q_out, k_out

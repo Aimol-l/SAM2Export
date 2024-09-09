@@ -26,7 +26,6 @@ class ImageEncoder(nn.Module):
             self.trunk.channel_list == self.neck.backbone_channel_list
         ), f"Channel dims of trunk and neck do not match. Trunk: {self.trunk.channel_list}, neck: {self.neck.backbone_channel_list}"
 
-    # 
     def forward(self, sample: torch.Tensor):
         # Forward through backbone
         features, pos = self.neck(self.trunk(sample))
