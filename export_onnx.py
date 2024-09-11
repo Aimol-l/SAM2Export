@@ -158,15 +158,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     sam2_model = build_sam2(args.config, args.checkpoint, device="cpu")
 
-    # image_encoder = ImageEncoder(sam2_model).cpu()
-    # export_image_encoder(image_encoder,args.outdir)
+    image_encoder = ImageEncoder(sam2_model).cpu()
+    export_image_encoder(image_encoder,args.outdir)
 
     image_decoder = ImageDecoder(sam2_model).cpu()
     export_image_decoder(image_decoder,args.outdir)
 
 
-    # mem_attention = MemAttention(sam2_model).cpu()
-    # export_memory_attention(mem_attention,args.outdir)
+    mem_attention = MemAttention(sam2_model).cpu()
+    export_memory_attention(mem_attention,args.outdir)
 
-    # mem_encoder   = MemEncoder(sam2_model).cpu()
-    # export_memory_encoder(mem_encoder,args.outdir)
+    mem_encoder   = MemEncoder(sam2_model).cpu()
+    export_memory_encoder(mem_encoder,args.outdir)
