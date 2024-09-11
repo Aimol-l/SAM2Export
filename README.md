@@ -3,10 +3,11 @@
 
 ## 下载pt模型文件
 
+```sh
 cd checkpoints
 ./download_ckpts.sh
-
 mkdir base+ large small tiny
+```
 
 ## run
 
