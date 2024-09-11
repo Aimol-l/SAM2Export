@@ -78,7 +78,7 @@ def export_memory_attention(model,onnx_path):
 def export_image_decoder(model,onnx_path):
     point_coords = torch.randn(1,2,2).cpu()
     point_labels = torch.randn(1,2).cpu()
-    frame_size = torch.tensor([1024,1024],dtype=torch.int32)
+    frame_size = torch.tensor([1024,1024],dtype=torch.int64)
     image_embed = torch.randn(1,256,64,64).cpu()
     high_res_feats_0 = torch.randn(1,32,256,256).cpu()
     high_res_feats_1 = torch.randn(1,64,128,128).cpu()
@@ -158,15 +158,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     sam2_model = build_sam2(args.config, args.checkpoint, device="cpu")
 
-    image_encoder = ImageEncoder(sam2_model).cpu()
-    export_image_encoder(image_encoder,args.outdir)
+    # image_encoder = ImageEncoder(sam2_model).cpu()
+    # export_image_encoder(image_encoder,args.outdir)
 
     image_decoder = ImageDecoder(sam2_model).cpu()
     export_image_decoder(image_decoder,args.outdir)
 
 
-    mem_attention = MemAttention(sam2_model).cpu()
-    export_memory_attention(mem_attention,args.outdir)
+    # mem_attention = MemAttention(sam2_model).cpu()
+    # export_memory_attention(mem_attention,args.outdir)
 
-    mem_encoder   = MemEncoder(sam2_model).cpu()
-    export_memory_encoder(mem_encoder,args.outdir)
+    # mem_encoder   = MemEncoder(sam2_model).cpu()
+    # export_memory_encoder(mem_encoder,args.outdir)
