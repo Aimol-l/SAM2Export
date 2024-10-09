@@ -34,30 +34,35 @@ def export_image_encoder(model,onnx_path):
 def export_memory_attention(model,onnx_path):
     current_vision_feat = torch.randn(1,256,64,64)      #[1, 256, 64, 64],当前帧的视觉特征
     current_vision_pos_embed = torch.randn(4096,1,256)  #[4096, 1, 256],当前帧的位置特征
-    memory_0 = torch.randn(16,256)                   
-    memory_1 = torch.randn(7,64,64,64)
-    memory_pos_embed = torch.randn(7*4096+64,1,64)      #[y*4096,1,64], 最近y帧的位置编码特性
+
+    memory_1 = torch.randn(7,64,64,64)     # 7是缓存的最近7帧              
+    memory_2 = torch.randn(16,256)         # 16 也是缓存帧数
+    memory_pos_1 = torch.randn(4096*7,1,64)
+    memory_pos_2 = torch.zeros(16,256)
+
     out = model(
-            current_vision_feat = current_vision_feat,
-            current_vision_pos_embed = current_vision_pos_embed,
-            memory_0 = memory_0,
-            memory_1 = memory_1,
-            memory_pos_embed = memory_pos_embed
-        )
-    input_name = ["current_vision_feat",
-                "current_vision_pos_embed",
-                "memory_0",
+        current_vision_feat = current_vision_feat,
+        current_vision_pos_embed = current_vision_pos_embed,
+        memory_1 = memory_1,
+        memory_2 = memory_2,
+        memory_pos_1 = memory_pos_1,
+        memory_pos_2 = memory_pos_2
+    )
+    input_name = ["curr",
+                "curr_pos",
                 "memory_1",
-                "memory_pos_embed"]
+                "memory_2",
+                "memory_pos_1",
+                "memory_pos_2"]
     dynamic_axes = {
-        "num_obj_ptr":{0: "num"},
-        "memory_0": {0: "num"},
-        "memory_1": {0: "buff_size"},
-        "memory_pos_embed": {0: "buff_size"}
+        "memory_1": {0: "num"},
+        "memory_2": {0: "buff_size"},
+        "memory_pos_1": {0: "num*4096"},
+        "memory_pos_2": {0: "buff_size"}
     }
     torch.onnx.export(
         model,
-        (current_vision_feat,current_vision_pos_embed,memory_0,memory_1,memory_pos_embed),
+        (current_vision_feat,current_vision_pos_embed,memory_1,memory_2,memory_pos_1,memory_pos_2),
         onnx_path+"memory_attention.onnx",
         export_params=True,
         opset_version=17,
@@ -145,7 +150,7 @@ def export_memory_encoder(model,onnx_path):
     print("memory_encoder.onnx model is valid!")
 
 #****************************************************************************
-model_type = ["tiny","small","large","base+"][3]
+model_type = ["tiny","small","large","base+"][1]
 onnx_output_path = "checkpoints/{}/".format(model_type)
 model_config_file = "sam2_hiera_{}.yaml".format(model_type)
 model_checkpoints_file = "checkpoints/sam2_hiera_{}.pt".format(model_type)
@@ -158,15 +163,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     sam2_model = build_sam2(args.config, args.checkpoint, device="cpu")
 
-    image_encoder = ImageEncoder(sam2_model).cpu()
-    export_image_encoder(image_encoder,args.outdir)
+    # image_encoder = ImageEncoder(sam2_model).cpu()
+    # export_image_encoder(image_encoder,args.outdir)
 
-    image_decoder = ImageDecoder(sam2_model).cpu()
-    export_image_decoder(image_decoder,args.outdir)
+    # image_decoder = ImageDecoder(sam2_model).cpu()
+    # export_image_decoder(image_decoder,args.outdir)
 
 
     mem_attention = MemAttention(sam2_model).cpu()
     export_memory_attention(mem_attention,args.outdir)
 
-    mem_encoder   = MemEncoder(sam2_model).cpu()
-    export_memory_encoder(mem_encoder,args.outdir)
+    # mem_encoder   = MemEncoder(sam2_model).cpu()
+    # export_memory_encoder(mem_encoder,args.outdir)

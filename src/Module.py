@@ -61,30 +61,36 @@ class MemAttention(nn.Module):
         self,
         current_vision_feat: torch.Tensor,      #[1, 256, 64, 64], 当前帧的视觉特征
         current_vision_pos_embed: torch.Tensor, #[4096, 1, 256], 当前帧的位置特征
-        memory_0:torch.Tensor,                  # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
-        memory_1:torch.Tensor,                  # [n,64,64,64]->[n,64,4096]->[4096n,1,64]
-        memory_pos_embed:torch.Tensor           #[y*4096,1,64], 最近y帧的位置编码特性
+        memory_1:torch.Tensor,                  # [n,64,64,64]->[n,64,4096]->[4096n,1,64] 
+        memory_2:torch.Tensor,                  # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
+        memory_pos_1:torch.Tensor,              # [y*4096,1,64]
+        memory_pos_2:torch.Tensor               # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
     ) -> tuple[Any]:
-        num_obj_ptr_tokens =  memory_0.shape[0]*4
-        current_vision_feat=current_vision_feat.permute(2,3,0,1).reshape(4096,1,256)
+        # num_obj_ptr_tokens =  memory_2.shape[0]*4
+        current_vision_feat = current_vision_feat.permute(2,3,0,1).reshape(4096,1,256)
         current_vision_feat = current_vision_feat - self.no_mem_embed
-
-        memory_0 = memory_0.reshape(-1,1,4,64)
-        memory_0 = memory_0.permute(0, 2, 1, 3).flatten(0, 1)
 
         memory_1 = memory_1.view(-1, 64, 64*64).permute(0,2,1)
         memory_1 = memory_1.reshape(-1,1,64)
 
-        print(memory_0.shape,memory_1.shape)
-        memory = torch.cat((memory_1,memory_0),dim=0)
+        memory_2 = memory_2.reshape(-1,1,4,64)
+        memory_2 = memory_2.permute(0, 2, 1, 3).flatten(0, 1)
+
+        memory_pos_2 = memory_pos_2.reshape(-1,1,4,64)
+        memory_pos_2 = memory_pos_2.permute(0, 2, 1, 3).flatten(0, 1)
+
+        self.memory_attention.allocate_rope_attention_weight(
+            curr = current_vision_feat,
+            curr_pos = current_vision_pos_embed
+        )
         pix_feat_with_mem = self.memory_attention(
             curr = current_vision_feat,
+            memory_1 = memory_1,
+            memory_2 = memory_2,
             curr_pos = current_vision_pos_embed,
-            memory = memory,
-            memory_pos = memory_pos_embed,
-            num_obj_ptr_tokens= num_obj_ptr_tokens,
+            memory_pos_1 = memory_pos_1,
+            memory_pos_2 = memory_pos_2,
         )
-        # reshape the output (HW)xBxC => BxCxHxW
         image_embed = pix_feat_with_mem.permute(1, 2, 0).view(1, 256, 64, 64) # [1,256,64,64]
         return image_embed #[1,256,64,64]
 
