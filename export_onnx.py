@@ -35,10 +35,10 @@ def export_memory_attention(model,onnx_path):
     current_vision_feat = torch.randn(1,256,64,64)      #[1, 256, 64, 64],当前帧的视觉特征
     current_vision_pos_embed = torch.randn(4096,1,256)  #[4096, 1, 256],当前帧的位置特征
 
-    memory_1 = torch.randn(7,64,64,64)     # 7是缓存的最近7帧              
-    memory_2 = torch.randn(16,256)         # 16 也是缓存帧数
+    memory_1 = torch.randn(16,256)         # 16 也是缓存帧数
+    memory_2 = torch.randn(7,64,64,64)     # 7是缓存的最近7帧              
     memory_pos_1 = torch.randn(4096*7,1,64)
-    memory_pos_2 = torch.zeros(16,256)
+    memory_pos_2 = torch.zeros(4*16,1,64)  # 16 也是缓存帧数
 
     out = model(
         current_vision_feat = current_vision_feat,
@@ -55,10 +55,10 @@ def export_memory_attention(model,onnx_path):
                 "memory_pos_1",
                 "memory_pos_2"]
     dynamic_axes = {
-        "memory_1": {0: "num"},
-        "memory_2": {0: "buff_size"},
+        "memory_1": {0: "buff_size"},
+        "memory_2": {0: "num"},
         "memory_pos_1": {0: "num*4096"},
-        "memory_pos_2": {0: "buff_size"}
+        "memory_pos_2": {0: "buff_size*4"}
     }
     torch.onnx.export(
         model,

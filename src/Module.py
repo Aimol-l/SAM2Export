@@ -61,23 +61,23 @@ class MemAttention(nn.Module):
         self,
         current_vision_feat: torch.Tensor,      #[1, 256, 64, 64], 当前帧的视觉特征
         current_vision_pos_embed: torch.Tensor, #[4096, 1, 256], 当前帧的位置特征
-        memory_1:torch.Tensor,                  # [n,64,64,64]->[n,64,4096]->[4096n,1,64] 
-        memory_2:torch.Tensor,                  # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
+        memory_1:torch.Tensor,                  # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
+        memory_2:torch.Tensor,                  # [n,64,64,64]->[n,64,4096]->[4096n,1,64] 
         memory_pos_1:torch.Tensor,              # [y*4096,1,64]
         memory_pos_2:torch.Tensor               # [num_obj_ptr,256]->[num_obj_ptr,4,64]->[4*num_obj_ptr,1,64]
     ) -> tuple[Any]:
-        # num_obj_ptr_tokens =  memory_2.shape[0]*4
+        # num_obj_ptr_tokens =  memory_1.shape[0]*4
         current_vision_feat = current_vision_feat.permute(2,3,0,1).reshape(4096,1,256)
         current_vision_feat = current_vision_feat - self.no_mem_embed
 
-        memory_1 = memory_1.view(-1, 64, 64*64).permute(0,2,1)
-        memory_1 = memory_1.reshape(-1,1,64)
+        memory_2 = memory_2.view(-1, 64, 64*64).permute(0,2,1)
+        memory_2 = memory_2.reshape(-1,1,64)
 
-        memory_2 = memory_2.reshape(-1,1,4,64)
-        memory_2 = memory_2.permute(0, 2, 1, 3).flatten(0, 1)
+        memory_1 = memory_1.reshape(-1,1,4,64)
+        memory_1 = memory_1.permute(0, 2, 1, 3).flatten(0, 1)
 
-        memory_pos_2 = memory_pos_2.reshape(-1,1,4,64)
-        memory_pos_2 = memory_pos_2.permute(0, 2, 1, 3).flatten(0, 1)
+        # memory_pos_2 = memory_pos_2.reshape(-1,1,4,64)
+        # memory_pos_2 = memory_pos_2.permute(0, 2, 1, 3).flatten(0, 1)
 
         self.memory_attention.allocate_rope_attention_weight(
             curr = current_vision_feat,
@@ -85,8 +85,8 @@ class MemAttention(nn.Module):
         )
         pix_feat_with_mem = self.memory_attention(
             curr = current_vision_feat,
-            memory_1 = memory_1,
-            memory_2 = memory_2,
+            memory_1 = memory_2,
+            memory_2 = memory_1,
             curr_pos = current_vision_pos_embed,
             memory_pos_1 = memory_pos_1,
             memory_pos_2 = memory_pos_2,
